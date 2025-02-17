@@ -9,37 +9,94 @@ pub struct SearchResult {
     content: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchOptions {
+    pattern: String,
+    directory: String,
+    case_sensitive: bool,
+    search_hidden: bool,
+    max_depth: u32,
+    file_type: Option<String>,
+    include_globs: Vec<String>,
+    exclude_globs: Vec<String>,
+}
+
 #[command]
 pub async fn search_files(
     app: tauri::AppHandle,
-    pattern: String,
-    directory: String,
+    options: SearchOptions,
 ) -> Result<Vec<SearchResult>, String> {
-    let mut results = Vec::new();
+    if options.max_depth == 0 || options.max_depth > 10 {
+        return Err("搜索深度必须在1到10之间".to_string());
+    }
+
+    // 先收集所有需要的字符串
+    let mut owned_strings = Vec::new();
     
+    // 处理排除的文件路径模式
+    for glob in &options.exclude_globs {
+        if !glob.is_empty() {
+            owned_strings.push(format!("!{}", glob));
+        }
+    }
+
+    // 添加深度字符串
+    let depth_str = options.max_depth.to_string();
+    owned_strings.push(depth_str);
+
+    // 现在构建参数数组
+    let mut args = Vec::new();
+    args.extend_from_slice(&["--json", "-H", "-n"]);
+    
+    if !options.case_sensitive {
+        args.push("-i");
+    }
+    
+    if options.search_hidden {
+        args.extend_from_slice(&["--hidden", "--no-ignore"]);
+    }
+
+    // 添加文件类型过滤
+    if let Some(file_type) = &options.file_type {
+        if !file_type.is_empty() {
+            args.extend_from_slice(&["-t", file_type]);
+        }
+    }
+
+    // 添加包含的文件路径模式
+    for glob in &options.include_globs {
+        if !glob.is_empty() {
+            args.extend_from_slice(&["-g", glob]);
+        }
+    }
+
+    // 添加排除的文件路径模式
+    let exclude_count = options.exclude_globs.iter().filter(|glob| !glob.is_empty()).count();
+    for i in 0..exclude_count {
+        args.extend_from_slice(&["-g", &owned_strings[i]]);
+    }
+    
+    // 添加深度参数
+    args.extend_from_slice(&[
+        "--max-depth",
+        owned_strings.last().unwrap(),
+        &options.pattern,
+        &options.directory,
+    ]);
+
     let output = app
         .shell()
         .sidecar("rg")
         .map_err(|e| e.to_string())?
-        .args([
-            "--json",
-            "-r",
-            "-H",
-            "-n",
-            "-i",
-            "--hidden",
-            "--no-ignore",
-            "--max-depth",
-            "3",
-            &pattern,
-            &directory,
-        ])
+        .args(args)
         .output()
         .await
         .map_err(|e| e.to_string())?;
 
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
 
     for line in stdout.lines() {
         if line.is_empty() { continue; }
