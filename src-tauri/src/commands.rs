@@ -7,6 +7,7 @@ pub struct SearchResult {
     path: String,
     line_number: u64,
     content: String,
+    is_match: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,6 +20,7 @@ pub struct SearchOptions {
     file_type: Option<String>,
     include_globs: Vec<String>,
     exclude_globs: Vec<String>,
+    context_lines: u32,
 }
 
 #[command]
@@ -46,7 +48,8 @@ pub async fn search_files(
 
     // 现在构建参数数组
     let mut args = Vec::new();
-    args.extend_from_slice(&["--json", "-H", "-n"]);
+    let context_lines_str = options.context_lines.to_string();
+    args.extend_from_slice(&["--json", "-H", "-n", "-C", &context_lines_str]);
     
     if !options.case_sensitive {
         args.push("-i");
@@ -102,23 +105,35 @@ pub async fn search_files(
         if line.is_empty() { continue; }
         
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-            if value["type"] == "match" {
-                if let Some(data) = value.get("data") {
-                    if let (Some(path), Some(line_number), Some(lines)) = (
-                        data.get("path").and_then(|v| v.get("text")).and_then(|v| v.as_str()),
-                        data.get("line_number").and_then(|v| v.as_u64()),
-                        data.get("lines").and_then(|v| v.get("text")).and_then(|v| v.as_str()),
-                    ) {
-                        results.push(SearchResult {
-                            path: path.to_string(),
-                            line_number,
-                            content: lines.to_string(),
-                        });
+            match value["type"].as_str() {
+                Some("match") | Some("context") => {
+                    if let Some(data) = value.get("data") {
+                        if let (Some(path), Some(line_number), Some(lines)) = (
+                            data.get("path").and_then(|v| v.get("text")).and_then(|v| v.as_str()),
+                            data.get("line_number").and_then(|v| v.as_u64()),
+                            data.get("lines").and_then(|v| v.get("text")).and_then(|v| v.as_str()),
+                        ) {
+                            results.push(SearchResult {
+                                path: path.to_string(),
+                                line_number,
+                                content: lines.to_string(),
+                                is_match: value["type"].as_str() == Some("match"),
+                            });
+                        }
                     }
                 }
+                _ => continue,
             }
         }
     }
+
+    // 按文件路径和行号排序，确保上下文行的正确顺序
+    results.sort_by(|a, b| {
+        match a.path.cmp(&b.path) {
+            std::cmp::Ordering::Equal => a.line_number.cmp(&b.line_number),
+            other => other,
+        }
+    });
 
     log::info!("Final results: {:?}", results);
     Ok(results)
